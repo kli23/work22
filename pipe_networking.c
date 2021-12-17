@@ -2,6 +2,66 @@
 
 
 /*=========================
+  server_setup
+  args:
+  creates the WKP (upstream) and opens it, waiting for a
+  connection.
+  removes the WKP once a connection has been made
+  returns the file descriptor for the upstream pipe.
+  =========================*/
+int server_setup() {
+  int from_client = 0;
+  int b;
+
+  printf("[server] handshake: making wkp\n");
+  b = mkfifo(WKP, 0600);
+  if ( b == -1 ) {
+    printf("mkfifo error %d: %s\n", errno, strerror(errno));
+    exit(-1);
+  }
+  from_client = open(WKP, O_RDONLY, 0);
+
+  remove(WKP);
+  printf("[server] handshake: removed wkp\n");
+
+  return from_client;
+}
+
+/*=========================
+  server_connect
+  args: int from_client
+  handles the subserver portion of the 3 way handshake
+  returns the file descriptor for the downstream pipe.
+  =========================*/
+int server_connect(int from_client) {
+  int to_client  = 0;
+  int b;
+  char buffer[HANDSHAKE_BUFFER_SIZE];
+
+  b = read(from_client, buffer, sizeof(buffer));
+  printf("[subserver] handshake received: -%s-\n", buffer);
+
+  to_client = open(buffer, O_WRONLY, 0);
+  //create SYN_ACK message
+  srand(time(NULL));
+  int r = rand() % HANDSHAKE_BUFFER_SIZE;
+  sprintf(buffer, "%d", r);
+
+  write(to_client, buffer, sizeof(buffer));
+  //read and check ACK
+  read(from_client, buffer, sizeof(buffer));
+  int ra = atoi(buffer);
+  if (ra != r+1) {
+    printf("[subserver] handshake received bad ACK: -%s-\n", buffer);
+    exit(0);
+  }//bad response
+  printf("[subserver] handshake received: -%s-\n", buffer);
+
+  return to_client;
+}
+
+
+/*=========================
   server_handshake
   args: int * to_client
   Performs the server side pipe 3 way handshake.
@@ -9,34 +69,41 @@
   returns the file descriptor for the upstream pipe.
   =========================*/
 int server_handshake(int *to_client) {
-  int from_client = 0;
-  mkfifo(WKP, 0644); // server creates a WKP and waits for connection
-  printf("WKP made, waiting for connection\n");
+  int b, from_client;
+  char buffer[HANDSHAKE_BUFFER_SIZE];
 
-
-  from_client = open(WKP, O_RDONLY);
-  char clientpid[HANDSHAKE_BUFFER_SIZE];
-  int received = read(from_client, clientpid, HANDSHAKE_BUFFER_SIZE); // server receives client's msg (it's pid) and removes WKP
-  if (received == -1) {
-      printf("Error: %s",strerror(errno));
-      return 0;
+  printf("[server] handshake: making wkp\n");
+  b = mkfifo(WKP, 0600);
+  if ( b == -1 ) {
+    printf("mkfifo error %d: %s\n", errno, strerror(errno));
+    exit(-1);
   }
-  printf("Client message received. Pid: %s. Removing WKP\n", clientpid);
+  //open & block
+  from_client = open(WKP, O_RDONLY, 0);
+  //remove WKP
   remove(WKP);
 
-
-  printf("Connecting to client FIFO and sending initial acknowledgement message\n");
-  *to_client = open(clientpid, O_WRONLY); //Server connects to client FIFO
-  int check = write(*to_client, "to client", HANDSHAKE_BUFFER_SIZE); //sends an initial acknowledgment message
-  if (check <= 0) {
-      printf("Error: %s",strerror(errno));
-      return 0;
-  }
+  printf("[server] handshake: removed wkp\n");
+  //read initial message
+  b = read(from_client, buffer, sizeof(buffer));
+  printf("[server] handshake received: -%s-\n", buffer);
 
 
-  read(from_client, clientpid, HANDSHAKE_BUFFER_SIZE);
-  printf("Received client message: %s\n", clientpid);
+  *to_client = open(buffer, O_WRONLY, 0);
+  //create SYN_ACK message
+  srand(time(NULL));
+  int r = rand() % HANDSHAKE_BUFFER_SIZE;
+  sprintf(buffer, "%d", r);
 
+  write(*to_client, buffer, sizeof(buffer));
+  //rad and check ACK
+  read(from_client, buffer, sizeof(buffer));
+  int ra = atoi(buffer);
+  if (ra != r+1) {
+    printf("[server] handshake received bad ACK: -%s-\n", buffer);
+    exit(0);
+  }//bad response
+  printf("[server] handshake received: -%s-\n", buffer);
 
   return from_client;
 }
@@ -50,42 +117,40 @@ int server_handshake(int *to_client) {
   returns the file descriptor for the downstream pipe.
   =========================*/
 int client_handshake(int *to_server) {
-  int from_server = 0;
-  char mypid[HANDSHAKE_BUFFER_SIZE];
-  printf("Creating private FIFO\n");
-  sprintf(mypid, "%d", getpid() );
-  printf("My pid: %s\n", mypid);
-  mkfifo(mypid, 0644); //client creates a private FIFO
 
+  int from_server;
+  char buffer[HANDSHAKE_BUFFER_SIZE];
+  char ppname[HANDSHAKE_BUFFER_SIZE];
 
-  printf("Connecting to server and sending private FIFO name. Waiting for response\n");
-  *to_server = open(WKP, O_WRONLY);
-  if (!*to_server) {
-      printf("Error: %s",strerror(errno));
-      return 0;
-  }
-  int check = write(*to_server, mypid, sizeof(mypid));
-  if (check <= 0) {
-      printf("Error: %s",strerror(errno));
-      return 0;
+  //make private pipe
+  printf("[client] handshake: making pp\n");
+  sprintf(ppname, "%d", getpid() );
+  mkfifo(ppname, 0600);
+
+  //send pp name to server
+  printf("[client] handshake: connecting to wkp\n");
+  *to_server = open( WKP, O_WRONLY, 0);
+  if ( *to_server == -1 ) {
+    printf("open error %d: %s\n", errno, strerror(errno));
+    exit(1);
   }
 
+  write(*to_server, ppname, sizeof(buffer));
+  //open and wait for connection
+  from_server = open(ppname, O_RDONLY, 0);
 
-  printf("Receiving server message. Removing private FIFO\n");
-  from_server = open(mypid, O_RDONLY);
-  char servermsg[HANDSHAKE_BUFFER_SIZE];
-  check = read(from_server, servermsg, HANDSHAKE_BUFFER_SIZE);
-  if (check <= 0) {
-      printf("Error: %s",strerror(errno));
-      return 0;
-  }
-  printf("Server message: %s\n", servermsg);
-  remove(mypid);
+  read(from_server, buffer, sizeof(buffer));
+  /*validate buffer code goes here */
+  printf("[client] handshake: received -%s-\n", buffer);
 
+  //remove pp
+  remove(ppname);
+  printf("[client] handshake: removed pp\n");
 
-  printf("Sending response to server\n");
-  write(*to_server, "to server", HANDSHAKE_BUFFER_SIZE);
-
+  //send ACK to server
+  int r = atoi(buffer) + 1;
+  sprintf(buffer, "%d", r);
+  write(*to_server, buffer, sizeof(buffer));
 
   return from_server;
 }
